@@ -24,8 +24,15 @@ contract VaultUpgradeable is
     address public signer2;
 
     mapping(uint256 => bool) public orderIds;
+    mapping(string => mapping(address => uint256)) public roomBalance;
 
     event Deposit(address indexed account, address token, uint256 amount);
+    event BuyIn(
+        address indexed account,
+        string roomId,
+        address token,
+        uint256 amount
+    );
     event Withdraw(
         uint256 orderId,
         address token,
@@ -33,7 +40,17 @@ contract VaultUpgradeable is
         address indexed user,
         address indexed signer
     );
+
+
     event WithdrawToken(address indexed account, address token, uint256 amount);
+    event WithdrawFromRoom(
+        uint256 orderId,
+        string roomId,
+        address token,
+        uint256 amount,
+        address indexed user,
+        address indexed signer
+    );
 
     function initialize() public initializer {
         __Ownable_init();
@@ -67,6 +84,7 @@ contract VaultUpgradeable is
         bytes memory signature2
     ) external {
         require(orderIds[orderId] == false, "already withdrawn");
+        orderIds[orderId] = true;
 
         bytes32 hash1 = keccak256(
             abi.encode(
@@ -97,15 +115,88 @@ contract VaultUpgradeable is
             IERC20Upgradeable(token).transfer(msg.sender, amount);
         }
 
-        orderIds[orderId] = true;
-
         emit Withdraw(orderId, token, amount, msg.sender, signer);
     }
 
-    function withdrawBalance(address payable account, uint256 amount)
-        external
-        onlyOwner
-    {
+    /**
+     * withdraw token anyone
+     */
+    function withdrawEx(
+        uint256 orderId,
+        address token,
+        address receiver,
+        uint256 amount,
+        bytes memory signature,
+        bytes memory signature2
+    ) external {
+        require(orderIds[orderId] == false, "already withdrawn");
+        orderIds[orderId] = true;
+
+        bytes32 hash1 = keccak256(
+            abi.encode(
+                "withdraw",
+                address(this),
+                receiver,
+                orderId,
+                token,
+                amount
+            )
+        );
+
+        bytes32 hash2 = keccak256(
+            abi.encodePacked("\x19Ethereum Signed Message:\n32", hash1)
+        );
+
+        address signer = recover(hash2, signature);
+        address _signer2 = recover(hash2, signature2);
+
+        require(signer == signer1 && _signer2 == signer2, "invalid signer");
+
+        if (token == address(0)) {
+            uint256 balance = address(this).balance;
+            require(amount <= balance, "Insufficient balance");
+
+            payable(receiver).transfer(amount);
+        } else {
+            IERC20Upgradeable(token).transfer(receiver, amount);
+        }
+
+        emit Withdraw(orderId, token, amount, receiver, signer);
+    }
+
+    /**
+     * batch withdraw token
+     */
+    function batchWithdraw(
+        uint256[] calldata orderId,
+        address[] calldata token,
+        address[] calldata receiver,
+        uint256[] calldata amount,
+        bytes[] memory signature,
+        bytes[] memory signature2
+    ) external {
+        require(orderId.length == token.length, "invalid length");
+        require(orderId.length == receiver.length, "invalid length");
+        require(orderId.length == amount.length, "invalid length");
+        require(orderId.length == signature.length, "invalid length");
+        require(orderId.length == signature2.length, "invalid length");
+
+        for (uint256 i = 0; i < orderId.length; i++) {
+            this.withdrawEx(
+                orderId[i],
+                token[i],
+                receiver[i],
+                amount[i],
+                signature[i],
+                signature2[i]
+            );
+        }
+    }
+
+    function withdrawBalance(
+        address payable account,
+        uint256 amount
+    ) external onlyOwner {
         uint256 balance = address(this).balance;
         require(amount <= balance, "Insufficient balance");
         AddressUpgradeable.sendValue(account, amount);
@@ -122,6 +213,71 @@ contract VaultUpgradeable is
         IERC20Upgradeable(token).transfer(account, amount);
         emit WithdrawToken(account, token, amount);
     }
+
+    function buyIn(
+        string memory roomId,
+        address token,
+        uint256 amount
+    ) external {
+        IERC20Upgradeable(token).transferFrom(
+            _msgSender(),
+            address(this),
+            amount
+        );
+
+        roomBalance[roomId][token] = roomBalance[roomId][token].add(amount);
+
+        emit BuyIn(_msgSender(), roomId, token, amount);
+    }
+
+    /**
+     * withdraw token from room
+     */
+    function withdrawFromRoom(
+        uint256 orderId,
+        string memory roomId,
+        address token,
+        address receiver,
+        uint256 amount,
+        bytes memory signature
+    ) external {
+        require(orderIds[orderId] == false, "already withdrawn");
+        orderIds[orderId] = true;
+
+        roomBalance[roomId][token] = roomBalance[roomId][token].sub(amount);
+
+        bytes32 hash1 = keccak256(
+            abi.encode(
+                "withdraw",
+                address(this),
+                receiver,
+                orderId,
+                roomId,
+                token,
+                amount
+            )
+        );
+
+        bytes32 hash2 = keccak256(
+            abi.encodePacked("\x19Ethereum Signed Message:\n32", hash1)
+        );
+
+        address signer = recover(hash2, signature);
+
+        require(signer == signer1, "invalid signer");
+
+        if (token == address(0)) {
+            uint256 balance = address(this).balance;
+            require(amount <= balance, "Insufficient balance");
+
+            payable(receiver).transfer(amount);
+        } else {
+            IERC20Upgradeable(token).transfer(receiver, amount);
+        }
+
+        emit WithdrawFromRoom(orderId, roomId, token, amount, receiver, signer);
+    }
+
 
     function setDev1(address _signer) public onlyOwner {
         signer1 = _signer;
@@ -145,11 +301,10 @@ contract VaultUpgradeable is
      * this is by receiving a hash of the original message (which may otherwise
      * be too long), and then calling {toEthSignedMessageHash} on it.
      */
-    function recover(bytes32 hash, bytes memory signature)
-        internal
-        pure
-        returns (address)
-    {
+    function recover(
+        bytes32 hash,
+        bytes memory signature
+    ) internal pure returns (address) {
         // Check the signature length
         if (signature.length != 65) {
             revert("ECDSA: invalid signature length");
